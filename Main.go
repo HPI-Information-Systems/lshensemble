@@ -155,7 +155,91 @@ func main() {
 	//fmt.Println("indexQueryTime,resultConfirmationTime,SerializationTime")
 	queryTimes,err := os.Create("queryTimes.csv")
 	queryTimes.WriteString("batchNumber,Time [s]\n")
-	for i := range domainsToIndex {
+
+	//files = files[1:10]
+	var fileCount = 0
+	queryFiles := filterByName(files,"query")
+	for _, f := range queryFiles {
+		if (fileCount%10 == 0) {
+			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
+		}
+		var fname= os.Args[1] + "/" + f.Name()
+		println("processing file "+f.Name())
+		var queryKeys, queryDomains = readDomains(fname, bucketNameToid[f.Name()], false)
+		for i:= range queryDomains {
+			mh := lshensemble.NewMinhash(seed, numHash)
+			for v := range queryDomains[i] {
+				mh.Push([]byte(v))
+			}
+			curRecord := &lshensemble.DomainRecord{
+				Key:       queryKeys[i],
+				Size:      len(queryDomains[i]),
+				Signature: mh.Signature()}
+
+			//FROM OLD LOOP:
+			count++
+			if (count%10000 == 0) {
+				batchTime := time.Since(curQueryingStart)
+				println(fmt.Sprintf("In file %v it took %v minutes to query %v out of %v (%v%%)",f.Name(),batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
+				curQueryingStart = time.Now()
+			}
+			// query in the domain records:
+			querySig := curRecord.Signature
+			querySize := curRecord.Size
+			var queryKey = curRecord.Key
+			var queryKeyString = fmt.Sprintf("%v", queryKey)
+			var queryValues = getKeys(queryDomains[i])
+			// set the containment startingThreshold
+			startingThreshold := 0.5
+			// get the keys of the candidate domainsToIndex (may contain false positives)
+			// through a channel with option to cancel early.
+			done := make(chan struct{})
+			defer close(done) // Important!!
+			results := index.Query(querySig, querySize, startingThreshold, done)
+			var matchCounts [] int
+			for i := range thresholds {
+				matchCounts = append(matchCounts, 0*i)
+			}
+			//indexQueryTime := time.Since(startIteration)
+			//startResultConfirmation := time.Now()
+			resCount :=0
+			for key := range results {
+				// ...
+				// You may want to include a post-processing step here to remove
+				// false positive domainsToIndex using the actual domain values.
+				// ...
+				// You can call break here to stop processing results.
+				var resultKeyAsString = fmt.Sprintf("%v", key)
+				curResultValues := getKeys(keyToDomainValues[resultKeyAsString])
+				addMatchCounts(queryValues, curResultValues, thresholds, matchCounts)
+				resCount++
+			}
+			//resultConfirmationTime := time.Since(startResultConfirmation)
+			//startSerialization := time.Now()
+			//fmt.Println("Time since start of iteration: %v", time.Since(startIteration))
+			var keyVals = strings.Split(queryKeyString, "||||")
+			var bucketID,_ =  strconv.Atoi(keyVals[0])
+			var pageID = keyVals[1]
+			var tableHID = keyVals[2]
+			var tableID = keyVals[3]
+			var column = keyVals[4]
+			//result writing new:
+			var f = outFiles[bucketID]
+			f.WriteString(fmt.Sprintf("%v,%v,%v,%v,", pageID, tableHID, tableID, column))
+			for i := range thresholds {
+				if (i == len(thresholds)-1) {
+					f.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
+				} else {
+					f.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
+				}
+			}
+
+		}
+		fileCount++
+
+	}
+
+	/*for i := range domainsToIndex {
 		//startIteration := time.Now()
 		count++
 		if (count%1000 == 0) {
@@ -215,18 +299,18 @@ func main() {
 			}
 		}
 		//result writing old:
-		/*sinlgeOutFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,",idToBucketName[bucketID], pageID, tableHID, tableID, column))
+		sinlgeOutFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,",idToBucketName[bucketID], pageID, tableHID, tableID, column))
 		for i := range thresholds {
 			if (i == len(thresholds)-1) {
 				sinlgeOutFile.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
 			} else {
 				sinlgeOutFile.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
 			}
-		}*/
+		}
 		//SerializationTime := time.Since(startSerialization)
 		//fmt.Printf("%v,%v,%v,%v\n", resCount,indexQueryTime.Seconds(),resultConfirmationTime.Seconds(),SerializationTime.Seconds())
 
-	}
+	}*/
 	/*for curQueryKey:= range myTableKeys {
 		count++
 		if(count % 1000 == 0){
@@ -284,6 +368,16 @@ func main() {
 		}
 	}
 	queryTimes.Close()
+}
+
+func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
+	filtered := make([]os.FileInfo, 0, len(infos))
+	for _, f := range infos{
+		if(strings.Contains(f.Name(),s)){
+			filtered = append(filtered,f)
+		}
+	}
+	return filtered
 }
 
 func serializeIndex(ensemble *lshensemble.LshEnsemble) {
