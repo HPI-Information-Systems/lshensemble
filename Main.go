@@ -28,12 +28,16 @@ func main() {
 	files, err := ioutil.ReadDir(os.Args[1])
 	trainFiles, _ := ioutil.ReadDir(os.Args[2])
 
+	queryFiles := filterByName(files,"query")
+	indexFiles := filterByName(files,"index")
+
+
 
 	//create int aliases for out Files to reduce memory usage of domainKeys
 	var idToBucketName = make(map[int]string)
 	var bucketNameToid = make(map[string]int)
 	fileID :=0
-	for _, file := range files {
+	for _, file := range queryFiles {
 		idToBucketName[fileID] = file.Name()
 		bucketNameToid[file.Name()] = fileID
 		fileID++
@@ -56,7 +60,7 @@ func main() {
 	}
 
 	//
-	domainsToIndex, keys, _ := readAllDomains(idToBucketName,bucketNameToid,"index")
+	domainsToIndex, keys, _ := readAllDomains(idToBucketName,bucketNameToid,indexFiles,trainFiles)
 
 	//create by hand:
 	//domainsToIndex, keys := buildSmallTestDomains()
@@ -128,10 +132,6 @@ func main() {
 	indexingTime := time.Since(programStart)
 	println(fmt.Sprintf("Build Index in %v hours",indexingTime.Hours()))
 	curQueryingStart := time.Now()
-	//THIRD STEP
-	//Chose Query:
-	//var queryDomain = Domain{json.Number(27439),"Suriname National Army",json.Number(586117314),"333936538-0","Origin",1,[] string{}}
-	var count =0
 	//TODO: result file writing:
 	if err != nil {
 		fmt.Println(err)
@@ -150,110 +150,67 @@ func main() {
 	for _,f := range outFiles{
 		writeFileHeader(f, thresholds)
 	}
-	//sinlgeOutFile,err := os.Create(os.Args[3] + "features.csv")
-	//writeFileHeader(sinlgeOutFile,thresholds)
-	//fmt.Println("indexQueryTime,resultConfirmationTime,SerializationTime")
-	queryTimes,err := os.Create("queryTimes.csv")
-	queryTimes.WriteString("batchNumber,Time [s]\n")
-
-	//files = files[1:10]
 	var fileCount = 0
-	queryFiles := filterByName(files,"query")
+	for _, f := range trainFiles {
+		if (fileCount%10 == 0) {
+			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
+		}
+		var fname= os.Args[2] + "/" + f.Name()
+		println("processing file "+f.Name())
+		var curFileStart = time.Now()
+		curOutFile,errOutFile := os.Create(os.Args[3] + f.Name() + "_features.csv")
+		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues,curOutFile)
+		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
+		fileCount++
+	}
+	println("Done with querying train Files")
 	for _, f := range queryFiles {
 		if (fileCount%10 == 0) {
 			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
 		}
 		var fname= os.Args[1] + "/" + f.Name()
 		println("processing file "+f.Name())
-		var queryKeys, queryDomains = readDomains(fname, bucketNameToid[f.Name()], false)
-		for i:= range queryDomains {
-			mh := lshensemble.NewMinhash(seed, numHash)
-			for v := range queryDomains[i] {
-				mh.Push([]byte(v))
-			}
-			curRecord := &lshensemble.DomainRecord{
-				Key:       queryKeys[i],
-				Size:      len(queryDomains[i]),
-				Signature: mh.Signature()}
-
-			//FROM OLD LOOP:
-			count++
-			if (count%10000 == 0) {
-				batchTime := time.Since(curQueryingStart)
-				println(fmt.Sprintf("In file %v it took %v minutes to query %v out of %v (%v%%)",f.Name(),batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
-				curQueryingStart = time.Now()
-			}
-			// query in the domain records:
-			querySig := curRecord.Signature
-			querySize := curRecord.Size
-			var queryKey = curRecord.Key
-			var queryKeyString = fmt.Sprintf("%v", queryKey)
-			var queryValues = getKeys(queryDomains[i])
-			// set the containment startingThreshold
-			startingThreshold := 0.5
-			// get the keys of the candidate domainsToIndex (may contain false positives)
-			// through a channel with option to cancel early.
-			done := make(chan struct{})
-			defer close(done) // Important!!
-			results := index.Query(querySig, querySize, startingThreshold, done)
-			var matchCounts [] int
-			for i := range thresholds {
-				matchCounts = append(matchCounts, 0*i)
-			}
-			//indexQueryTime := time.Since(startIteration)
-			//startResultConfirmation := time.Now()
-			resCount :=0
-			for key := range results {
-				// ...
-				// You may want to include a post-processing step here to remove
-				// false positive domainsToIndex using the actual domain values.
-				// ...
-				// You can call break here to stop processing results.
-				var resultKeyAsString = fmt.Sprintf("%v", key)
-				curResultValues := getKeys(keyToDomainValues[resultKeyAsString])
-				addMatchCounts(queryValues, curResultValues, thresholds, matchCounts)
-				resCount++
-			}
-			//resultConfirmationTime := time.Since(startResultConfirmation)
-			//startSerialization := time.Now()
-			//fmt.Println("Time since start of iteration: %v", time.Since(startIteration))
-			var keyVals = strings.Split(queryKeyString, "||||")
-			var bucketID,_ =  strconv.Atoi(keyVals[0])
-			var pageID = keyVals[1]
-			var tableHID = keyVals[2]
-			var tableID = keyVals[3]
-			var column = keyVals[4]
-			//result writing new:
-			var f = outFiles[bucketID]
-			f.WriteString(fmt.Sprintf("%v,%v,%v,%v,", pageID, tableHID, tableID, column))
-			for i := range thresholds {
-				if (i == len(thresholds)-1) {
-					f.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
-				} else {
-					f.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
-				}
-			}
-
-		}
+		var curFileStart = time.Now()
+		processQueryFile(fname, bucketNameToid, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues, outFiles)
+		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
 		fileCount++
-
 	}
+	for _, f := range outFiles {
+		err = f.Close()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v",time.Since(programStart).Hours()))
+}
 
-	/*for i := range domainsToIndex {
-		//startIteration := time.Now()
+func processQueryFile(fname string, f os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, keyToDomainValues map[string]map[string]bool, outFile os.FileInfo) {
+	var count = 0
+	var queryKeys, queryDomains = readDomains(fname, bucketNameToid[f.Name()], false)
+	for i := range queryDomains {
+		mh := lshensemble.NewMinhash(seed, numHash)
+		for v := range queryDomains[i] {
+			mh.Push([]byte(v))
+		}
+		curRecord := &lshensemble.DomainRecord{
+			Key:       queryKeys[i],
+			Size:      len(queryDomains[i]),
+			Signature: mh.Signature()}
+
+		//FROM OLD LOOP:
 		count++
-		if (count%1000 == 0) {
+		if (count%10000 == 0) {
 			batchTime := time.Since(curQueryingStart)
-			println(fmt.Sprintf("Took %v minutes to query %v out of %v (%v%%)",batchTime.Minutes(), count, len(keys), 100.0*float64(count)/float64(len(keys))))
+			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", f.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
 			curQueryingStart = time.Now()
 		}
-		var queryIndex = i
 		// query in the domain records:
-		querySig := domainRecords[queryIndex].Signature
-		querySize := domainRecords[queryIndex].Size
-		var queryKey = domainRecords[queryIndex].Key
+		querySig := curRecord.Signature
+		querySize := curRecord.Size
+		var queryKey = curRecord.Key
 		var queryKeyString = fmt.Sprintf("%v", queryKey)
-		var queryValues = getKeys(keyToDomainValues[queryKeyString])
+		var queryValues = getKeys(queryDomains[i])
 		// set the containment startingThreshold
 		startingThreshold := 0.5
 		// get the keys of the candidate domainsToIndex (may contain false positives)
@@ -267,7 +224,7 @@ func main() {
 		}
 		//indexQueryTime := time.Since(startIteration)
 		//startResultConfirmation := time.Now()
-		resCount :=0
+		resCount := 0
 		for key := range results {
 			// ...
 			// You may want to include a post-processing step here to remove
@@ -283,7 +240,7 @@ func main() {
 		//startSerialization := time.Now()
 		//fmt.Println("Time since start of iteration: %v", time.Since(startIteration))
 		var keyVals = strings.Split(queryKeyString, "||||")
-		var bucketID,_ =  strconv.Atoi(keyVals[0])
+		var bucketID, _ = strconv.Atoi(keyVals[0])
 		var pageID = keyVals[1]
 		var tableHID = keyVals[2]
 		var tableID = keyVals[3]
@@ -298,76 +255,7 @@ func main() {
 				f.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
 			}
 		}
-		//result writing old:
-		sinlgeOutFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,",idToBucketName[bucketID], pageID, tableHID, tableID, column))
-		for i := range thresholds {
-			if (i == len(thresholds)-1) {
-				sinlgeOutFile.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
-			} else {
-				sinlgeOutFile.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
-			}
-		}
-		//SerializationTime := time.Since(startSerialization)
-		//fmt.Printf("%v,%v,%v,%v\n", resCount,indexQueryTime.Seconds(),resultConfirmationTime.Seconds(),SerializationTime.Seconds())
-
-	}*/
-	/*for curQueryKey:= range myTableKeys {
-		count++
-		if(count % 1000 == 0){
-			println(fmt.Sprintf("Queried %v out of %v",count,len(myTableKeys)))
-		}
-		var queryIndex = Find(keys,curQueryKey)
-		// query in the domain records:
-		querySig := domainRecords[queryIndex].Signature
-		querySize := domainRecords[queryIndex].Size
-		var queryKey = domainRecords[queryIndex].Key
-		var queryKeyString = fmt.Sprintf("%v",queryKey)
-		var queryValues = getKeys(keyToDomainValues[queryKeyString])
-		// set the containment startingThreshold
-		startingThreshold := 0.5
-		// get the keys of the candidate domainsToIndex (may contain false positives)
-		// through a channel with option to cancel early.
-		done := make(chan struct{})
-		defer close(done) // Important!!
-		results := index.Query(querySig, querySize, startingThreshold, done)
-		var matchCounts [] int
-		for i := range thresholds {
-			matchCounts = append(matchCounts,0*i)
-		}
-		for key := range results {
-			// ...
-			// You may want to include a post-processing step here to remove
-			// false positive domainsToIndex using the actual domain values.
-			// ...
-			// You can call break here to stop processing results.
-			var resultKeyAsString = fmt.Sprintf("%v", key)
-			curResultValues := getKeys(keyToDomainValues[resultKeyAsString])
-			var isNotFromQueries = !contains(myTableKeys,resultKeyAsString)
-			if(isNotFromQueries){
-				addMatchCounts(queryValues,curResultValues,thresholds,matchCounts)
-			}
-		}
-		var keyVals = strings.Split(curQueryKey,"||||")
-		var sequence = keyVals[0]
-		var table = keyVals[2]
-		var column = keyVals[4]
-		f.WriteString(fmt.Sprintf("%v,%v,%v,",sequence,table,column))
-		for i:= range thresholds{
-			if(i==len(thresholds)-1){
-				f.WriteString(fmt.Sprintf("%v\n",matchCounts[i]))
-			} else{
-				f.WriteString(fmt.Sprintf("%v,",matchCounts[i]))
-			}
-		}
-	}*/
-	for _,f := range outFiles {
-		err = f.Close()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
 	}
-	queryTimes.Close()
 }
 
 func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
@@ -392,7 +280,7 @@ func serializeIndex(ensemble *lshensemble.LshEnsemble) {
 }
 
 func writeFileHeader(f *os.File, thresholds []float64) {
-	f.WriteString("Sequence,Table,Column,")
+	f.WriteString("pageID, tableHID, tableID, column,")
 	for i := range thresholds {
 		if (i == len(thresholds)-1) {
 			f.WriteString(fmt.Sprintf("containmentAt_%v\n", thresholds[i]))
@@ -470,27 +358,20 @@ func readLines(s string) interface{} {
 var idToBucketName = make(map[int]string)
 var bucketNameToid = make(map[string]int)
 
-func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,inputType string) ([]map[string]bool, []string, map[string]bool) {
+func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,files []os.FileInfo,trainFiles []os.FileInfo) ([]map[string]bool, []string, map[string]bool) {
 	var domains [] map[string]bool
 	var keys [] string
-	files, err := ioutil.ReadDir(os.Args[1])
-	trainFiles, err2 := ioutil.ReadDir(os.Args[2])
-	if err != nil || err2 != nil{
-		log.Fatal(err)
-	}
 	//files = files[1:10]
 	var count = 0
 	for _, f := range files {
-		if(strings.Contains(f.Name(),inputType)) {
-			if (count%10 == 0) {
-				println(fmt.Sprintf("Read %v of %v files", count, len(files)))
-			}
-			var fname= os.Args[1] + "/" + f.Name()
-			var key, domain= readDomains(fname, bucketNameToid[f.Name()], false)
-			keys = append(keys, key...)
-			domains = append(domains, domain...)
-			count++
+		if (count%10 == 0) {
+			println(fmt.Sprintf("Read %v of %v files", count, len(files)))
 		}
+		var fname= os.Args[1] + "/" + f.Name()
+		var key, domain= readDomains(fname, bucketNameToid[f.Name()], false)
+		keys = append(keys, key...)
+		domains = append(domains, domain...)
+		count++
 	}
 	var myTableKeys = make(map[string]bool)
 	for _, f := range trainFiles {
