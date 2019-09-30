@@ -9,7 +9,6 @@ import ( //"github.com/ekzhu/lshensemble"
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -31,36 +30,8 @@ func main() {
 	queryFiles := filterByName(files,"query")
 	indexFiles := filterByName(files,"index")
 
-
-
-	//create int aliases for out Files to reduce memory usage of domainKeys
-	var idToBucketName = make(map[int]string)
-	var bucketNameToid = make(map[string]int)
-	fileID :=0
-	for _, file := range queryFiles {
-		idToBucketName[fileID] = file.Name()
-		bucketNameToid[file.Name()] = fileID
-		fileID++
-	}
-	for _, file := range trainFiles {
-		idToBucketName[fileID] = file.Name()
-		bucketNameToid[file.Name()] = fileID
-		fileID++
-	}
-	//result file writing new:
-	var outFiles = make(map[int]*os.File)
-	for bID, name := range idToBucketName {
-		curFile,err := os.Create(os.Args[3] + name + "_features.csv")
-		if err != nil {
-			fmt.Println("could not create output file")
-			fmt.Println(err)
-			return
-		}
-		outFiles[bID] =curFile
-	}
-
 	//
-	domainsToIndex, keys, _ := readAllDomains(idToBucketName,bucketNameToid,indexFiles,trainFiles)
+	domainsToIndex, keys, _ := readAllDomains(indexFiles,trainFiles)
 
 	//create by hand:
 	//domainsToIndex, keys := buildSmallTestDomains()
@@ -137,9 +108,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-
 	//file pointer for train files:
-
 	var thresholds [] float64
 	thresholds = append(thresholds,0.5)
 	thresholds = append(thresholds,0.6)
@@ -147,9 +116,6 @@ func main() {
 	thresholds = append(thresholds,0.8)
 	thresholds = append(thresholds,0.9)
 	thresholds = append(thresholds,1.0)
-	for _,f := range outFiles{
-		writeFileHeader(f, thresholds)
-	}
 	var fileCount = 0
 	for _, f := range trainFiles {
 		if (fileCount%10 == 0) {
@@ -158,9 +124,10 @@ func main() {
 		var fname= os.Args[2] + "/" + f.Name()
 		println("processing file "+f.Name())
 		var curFileStart = time.Now()
-		curOutFile,errOutFile := os.Create(os.Args[3] + f.Name() + "_features.csv")
+		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
 		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues,curOutFile)
 		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
+		curOutFile.Close()
 		fileCount++
 	}
 	println("Done with querying train Files")
@@ -171,23 +138,18 @@ func main() {
 		var fname= os.Args[1] + "/" + f.Name()
 		println("processing file "+f.Name())
 		var curFileStart = time.Now()
-		processQueryFile(fname, bucketNameToid, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues, outFiles)
+		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
+		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues, curOutFile)
 		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
+		curOutFile.Close()
 		fileCount++
-	}
-	for _, f := range outFiles {
-		err = f.Close()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
 	}
 	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v",time.Since(programStart).Hours()))
 }
 
-func processQueryFile(fname string, f os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, keyToDomainValues map[string]map[string]bool, outFile os.FileInfo) {
+func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, keyToDomainValues map[string]map[string]bool, outFile *os.File) {
 	var count = 0
-	var queryKeys, queryDomains = readDomains(fname, bucketNameToid[f.Name()], false)
+	var queryKeys, queryDomains = readDomains(fname,false)
 	for i := range queryDomains {
 		mh := lshensemble.NewMinhash(seed, numHash)
 		for v := range queryDomains[i] {
@@ -202,7 +164,7 @@ func processQueryFile(fname string, f os.FileInfo, seed int64, numHash int, curQ
 		count++
 		if (count%10000 == 0) {
 			batchTime := time.Since(curQueryingStart)
-			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", f.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
+			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFile.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
 			curQueryingStart = time.Now()
 		}
 		// query in the domain records:
@@ -240,19 +202,17 @@ func processQueryFile(fname string, f os.FileInfo, seed int64, numHash int, curQ
 		//startSerialization := time.Now()
 		//fmt.Println("Time since start of iteration: %v", time.Since(startIteration))
 		var keyVals = strings.Split(queryKeyString, "||||")
-		var bucketID, _ = strconv.Atoi(keyVals[0])
-		var pageID = keyVals[1]
-		var tableHID = keyVals[2]
-		var tableID = keyVals[3]
-		var column = keyVals[4]
+		var pageID = keyVals[0]
+		var tableHID = keyVals[1]
+		var tableID = keyVals[2]
+		var column = keyVals[3]
 		//result writing new:
-		var f = outFiles[bucketID]
-		f.WriteString(fmt.Sprintf("%v,%v,%v,%v,", pageID, tableHID, tableID, column))
+		outFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,", pageID, tableHID, tableID, column))
 		for i := range thresholds {
 			if (i == len(thresholds)-1) {
-				f.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
+				outFile.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
 			} else {
-				f.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
+				outFile.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
 			}
 		}
 	}
@@ -355,10 +315,7 @@ func readLines(s string) interface{} {
 	return values
 }
 
-var idToBucketName = make(map[int]string)
-var bucketNameToid = make(map[string]int)
-
-func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,files []os.FileInfo,trainFiles []os.FileInfo) ([]map[string]bool, []string, map[string]bool) {
+func readAllDomains(files []os.FileInfo,trainFiles []os.FileInfo) ([]map[string]bool, []string, map[string]bool) {
 	var domains [] map[string]bool
 	var keys [] string
 	//files = files[1:10]
@@ -368,7 +325,7 @@ func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,
 			println(fmt.Sprintf("Read %v of %v files", count, len(files)))
 		}
 		var fname= os.Args[1] + "/" + f.Name()
-		var key, domain= readDomains(fname, bucketNameToid[f.Name()], false)
+		var key, domain= readDomains(fname, false)
 		keys = append(keys, key...)
 		domains = append(domains, domain...)
 		count++
@@ -377,7 +334,7 @@ func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,
 	for _, f := range trainFiles {
 		println(fmt.Sprintf("Reading %v", f))
 		var fname = os.Args[2] + "/" + f.Name()
-		var key,domain = readDomains(fname,bucketNameToid[f.Name()],true)
+		var key,domain = readDomains(fname,true)
 		for i := range key{
 			myTableKeys[key[i]] = true
 		}
@@ -387,7 +344,7 @@ func readAllDomains(idToBucketName map[int]string,bucketNameToid map[string]int,
 	return domains,keys, myTableKeys
 }
 
-func readDomains(jsonFile string,bucketID int, keepSingleElem bool) ([]string,[]map[string]bool) {
+func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bool) {
 	file, err := os.Open(jsonFile)
 	if err != nil {
 		log.Fatal(err)
@@ -431,7 +388,7 @@ func readDomains(jsonFile string,bucketID int, keepSingleElem bool) ([]string,[]
 		//var containsEmptyString = false
 		//if _, ok := m[""]; ok { containsEmptyString = true}
 		if(keepSingleElem || len(m)>1) {
-			var domainKey = getDomainKey(bucketID,domainJson)
+			var domainKey = getDomainKey(domainJson)
 			keys = append(keys,domainKey)
 			domains = append(domains, m)
 		}
@@ -463,7 +420,7 @@ func readDomains(jsonFile string,bucketID int, keepSingleElem bool) ([]string,[]
 	return keys,domains
 }
 
-func getDomainKey(bID int,domain Domain) string {
-	return fmt.Sprintf("%v||||%v||||%v||||%v||||%v",bID, domain.PageID, domain.TableHID, domain.TID, domain.ColID)
+func getDomainKey(domain Domain) string {
+	return fmt.Sprintf("%v||||%v||||%v||||%v", domain.PageID, domain.TableHID, domain.TID, domain.ColID)
 }
 
