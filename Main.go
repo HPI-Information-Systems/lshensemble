@@ -33,11 +33,6 @@ func main() {
 	//
 	domainsToIndex, keys, _ := readAllDomains(indexFiles,trainFiles)
 
-	//create by hand:
-	//domainsToIndex, keys := buildSmallTestDomains()
-
-	// FIRST STEP
-
 	// initializing the domain records to hold the MinHash signatures
 	domainRecords := make([]*lshensemble.DomainRecord, len(domainsToIndex))
 
@@ -73,20 +68,6 @@ func main() {
 	//SECOND AND HALF STEP: sort
 	sort.Sort(lshensemble.BySize(domainRecords))
 
-	var keyToDomainValues = make(map[string]map[string]bool)
-	for i:= range domainsToIndex {
-		var curKey = keys[i]
-		keyToDomainValues[curKey] = domainsToIndex[i]
-	}
-
-	// Create index using equi-depth partitioning
-	// You can also use BootstrapLshEnsemblePlusEquiDepth for better accuracy
-	//index, err := lshensemble.BootstrapLshEnsembleEquiDepth(numPart, numHash, maxK,
-	//	len(domainRecords), lshensemble.Recs2Chan(domainRecords))
-	//if err != nil {
-	//	panic(err)
-	//}
-
 	println("Done Sorting")
 
 	// Create index using optimal partitioning
@@ -98,21 +79,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	serializeIndex(index)
 	println("Done Indexing")
 	indexingTime := time.Since(programStart)
 	println(fmt.Sprintf("Build Index in %v hours",indexingTime.Hours()))
 	curQueryingStart := time.Now()
-	//TODO: result file writing:
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	//file pointer for train files:
 	var thresholds [] float64
-	thresholds = append(thresholds,0.5)
-	thresholds = append(thresholds,0.6)
-	thresholds = append(thresholds,0.7)
 	thresholds = append(thresholds,0.8)
 	thresholds = append(thresholds,0.9)
 	thresholds = append(thresholds,1.0)
@@ -125,7 +101,8 @@ func main() {
 		println("processing file "+f.Name())
 		var curFileStart = time.Now()
 		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
-		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues,curOutFile)
+		writeFileHeader(curOutFile,thresholds)
+		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds,curOutFile)
 		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
 		curOutFile.Close()
 		fileCount++
@@ -139,7 +116,8 @@ func main() {
 		println("processing file "+f.Name())
 		var curFileStart = time.Now()
 		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
-		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, keyToDomainValues, curOutFile)
+		writeFileHeader(curOutFile,thresholds)
+		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, curOutFile)
 		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
 		curOutFile.Close()
 		fileCount++
@@ -147,7 +125,7 @@ func main() {
 	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v",time.Since(programStart).Hours()))
 }
 
-func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, keyToDomainValues map[string]map[string]bool, outFile *os.File) {
+func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, outFile *os.File) {
 	var count = 0
 	var queryKeys, queryDomains = readDomains(fname,false)
 	for i := range queryDomains {
@@ -159,10 +137,8 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 			Key:       queryKeys[i],
 			Size:      len(queryDomains[i]),
 			Signature: mh.Signature()}
-
-		//FROM OLD LOOP:
 		count++
-		if (count%10000 == 0) {
+		if (count%1000 == 0) {
 			batchTime := time.Since(curQueryingStart)
 			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFile.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
 			curQueryingStart = time.Now()
@@ -172,35 +148,20 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 		querySize := curRecord.Size
 		var queryKey = curRecord.Key
 		var queryKeyString = fmt.Sprintf("%v", queryKey)
-		var queryValues = getKeys(queryDomains[i])
-		// set the containment startingThreshold
-		startingThreshold := 0.5
-		// get the keys of the candidate domainsToIndex (may contain false positives)
-		// through a channel with option to cancel early.
-		done := make(chan struct{})
-		defer close(done) // Important!!
-		results := index.Query(querySig, querySize, startingThreshold, done)
 		var matchCounts [] int
 		for i := range thresholds {
-			matchCounts = append(matchCounts, 0*i)
+			done := make(chan struct{})
+			defer close(done) // Important!!
+			// set the containment startingThreshold
+			// get the keys of the candidate domainsToIndex (may contain false positives)
+			// through a channel with option to cancel early.
+			results := index.Query(querySig, querySize, thresholds[i], done)
+			resCount := 0
+			for range results {
+				resCount++
+			}
+			matchCounts = append(matchCounts, resCount)
 		}
-		//indexQueryTime := time.Since(startIteration)
-		//startResultConfirmation := time.Now()
-		resCount := 0
-		for key := range results {
-			// ...
-			// You may want to include a post-processing step here to remove
-			// false positive domainsToIndex using the actual domain values.
-			// ...
-			// You can call break here to stop processing results.
-			var resultKeyAsString = fmt.Sprintf("%v", key)
-			curResultValues := getKeys(keyToDomainValues[resultKeyAsString])
-			addMatchCounts(queryValues, curResultValues, thresholds, matchCounts)
-			resCount++
-		}
-		//resultConfirmationTime := time.Since(startResultConfirmation)
-		//startSerialization := time.Now()
-		//fmt.Println("Time since start of iteration: %v", time.Since(startIteration))
 		var keyVals = strings.Split(queryKeyString, "||||")
 		var pageID = keyVals[0]
 		var tableHID = keyVals[1]
@@ -228,17 +189,6 @@ func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
 	return filtered
 }
 
-func serializeIndex(ensemble *lshensemble.LshEnsemble) {
-	indexOut,err := os.Create("index.json")
-	json,err := json.Marshal(ensemble)
-	if err != nil {
-		fmt.Printf("Error: %s", err)
-		return;
-	}
-	indexOut.WriteString(string(json))
-	indexOut.Close()
-}
-
 func writeFileHeader(f *os.File, thresholds []float64) {
 	f.WriteString("pageID, tableHID, tableID, column,")
 	for i := range thresholds {
@@ -264,55 +214,12 @@ func addMatchCounts(query []string, candidate []string,thresholds []float64,matc
 	}
 }
 
-func contains(m map[string]bool, s string) bool {
-	if _, ok := m[s]; ok { return true} else {return false}
-}
-
 func toMap(elements []string) map[string]bool {
 	elementMap := make(map[string]bool)
 	for i := 0; i < len(elements); i += 1 {
 		elementMap[elements[i]] = true
 	}
 	return elementMap
-}
-
-
-
-func getKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys;
-}
-
-// Find returns the smallest index i at which x == a[i],
-// or len(a) if there is no such index.
-func Find(a []string, x string) int {
-	for i, n := range a {
-		if x == n {
-			return i
-		}
-	}
-	return len(a)
-}
-
-func readLines(s string) interface{} {
-	file, err := os.Open(s)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		var values [] string
-		for scanner.Scan() {
-		values = append(values,scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-	return values
 }
 
 func readAllDomains(files []os.FileInfo,trainFiles []os.FileInfo) ([]map[string]bool, []string, map[string]bool) {
@@ -350,17 +257,6 @@ func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bo
 		log.Fatal(err)
 	}
 	defer file.Close()
-	//
-	//scanner := bufio.NewScanner(file)
-	//var m = make(map[string]bool)
-	//for scanner.Scan() {
-	//	m[scanner.Text()] = true
-	//}
-	//if err := scanner.Err(); err != nil {
-	//	log.Fatal(err)
-	//}
-	//return m
-	// read our opened xmlFile as a byte array.
 	reader := bufio.NewReader(file)
 	var keys [] string
 	var domains [] map[string]bool
@@ -383,10 +279,6 @@ func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bo
 		for j := 0; j < len(domainJson.Values); j++ {
 			m[domainJson.Values[j]] = true
 		}
-		//filter out some sonsense:
-		//_, ok := candidateMap[k]; ok
-		//var containsEmptyString = false
-		//if _, ok := m[""]; ok { containsEmptyString = true}
 		if(keepSingleElem || len(m)>1) {
 			var domainKey = getDomainKey(domainJson)
 			keys = append(keys,domainKey)
@@ -394,29 +286,6 @@ func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bo
 		}
 
 	}
-
-
-	//OLD CODE
-	/*byteValue, _ := ioutil.ReadAll(file)
-
-
-	err = json.Unmarshal(byteValue, &domainsJson)
-	for i := 0; i < len(domainsJson.Domains); i++ {
-		var domainJson = domainsJson.Domains[i]
-		var m = make(map[string]bool)
-		for j := 0; j < len(domainJson.Values); j++ {
-			m[domainJson.Values[j]] = true
-		}
-		//filter out some sonsense:
-		//_, ok := candidateMap[k]; ok
-		//var containsEmptyString = false
-		//if _, ok := m[""]; ok { containsEmptyString = true}
-		if(keepSingleElem || len(m)>1) {
-			var domainKey = getDomainKey(domainJson)
-			keys = append(keys,domainKey)
-			domains = append(domains, m)
-		}
-	}*/
 	return keys,domains
 }
 
