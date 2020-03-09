@@ -14,24 +14,24 @@ import ( //"github.com/ekzhu/lshensemble"
 )
 
 type Domain struct {
-	PageID json.Number `json:"pageID"''`
-	TableHID string `json:"TableHID"''`
-	TID int `json:"tableID"''`
-	ColID int `json:"colID"''`
-	Values []string `json:"values"''`
+	Id       string   //`json:"Id"''`
+	version  string   //`json:"version"''` //TODO: fix this
+	AttrName string   //`json:"AttrName"''`
+	Values   []string `json:"values"''`
 }
 
 func main() {
 
 	programStart := time.Now()
 	files, err := ioutil.ReadDir(os.Args[1])
-	trainFiles, _ := ioutil.ReadDir(os.Args[2])
 
-	queryFiles := filterByName(files,"query")
-	indexFiles := filterByName(files,"index")
-
+	queryFiles := filterByName(files, "query")
+	indexFiles := filterByName(files, "index")
+	if len(queryFiles) == 0 {
+		queryFiles = indexFiles
+	}
 	//
-	domainsToIndex, keys, _ := readAllDomains(indexFiles,trainFiles)
+	domainsToIndex, keys := readAllDomains(indexFiles)
 
 	// initializing the domain records to hold the MinHash signatures
 	domainRecords := make([]*lshensemble.DomainRecord, len(domainsToIndex))
@@ -74,60 +74,45 @@ func main() {
 	// You can also use BootstrapLshEnsemblePlusOptimal for better accuracy
 	index, err := lshensemble.BootstrapLshEnsembleOptimal(numPart, numHash, maxK,
 		func() <-chan *lshensemble.DomainRecord {
-			return lshensemble.Recs2Chan(domainRecords);
+			return lshensemble.Recs2Chan(domainRecords)
 		})
 	if err != nil {
 		panic(err)
 	}
 	println("Done Indexing")
 	indexingTime := time.Since(programStart)
-	println(fmt.Sprintf("Build Index in %v hours",indexingTime.Hours()))
+	println(fmt.Sprintf("Build Index in %v hours", indexingTime.Hours()))
 	curQueryingStart := time.Now()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	//file pointer for train files:
-	var thresholds [] float64
-	thresholds = append(thresholds,0.8)
-	thresholds = append(thresholds,0.9)
-	thresholds = append(thresholds,1.0)
+	var thresholds []float64
+	thresholds = append(thresholds, 0.8)
+	thresholds = append(thresholds, 0.9)
+	thresholds = append(thresholds, 1.0)
 	var fileCount = 0
-	for _, f := range trainFiles {
-		if (fileCount%10 == 0) {
-			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
-		}
-		var fname= os.Args[2] + "/" + f.Name()
-		println("processing file "+f.Name())
-		var curFileStart = time.Now()
-		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
-		writeFileHeader(curOutFile,thresholds)
-		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds,curOutFile)
-		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
-		curOutFile.Close()
-		fileCount++
-	}
-	println("Done with querying train Files")
 	for _, f := range queryFiles {
-		if (fileCount%10 == 0) {
+		if fileCount%10 == 0 {
 			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
 		}
-		var fname= os.Args[1] + "/" + f.Name()
-		println("processing file "+f.Name())
+		var fname = os.Args[1] + "/" + f.Name()
+		println("processing file " + f.Name())
 		var curFileStart = time.Now()
-		var curOutFile,_ = os.Create(os.Args[3] + f.Name() + "_features.csv")
-		writeFileHeader(curOutFile,thresholds)
+		var curOutFile, _ = os.Create(os.Args[2] + f.Name() + "_joinabilityGraph.csv")
+		writeFileHeader(curOutFile, thresholds)
 		processQueryFile(fname, f, seed, numHash, curQueryingStart, index, thresholds, curOutFile)
-		println(fmt.Sprintf("Total Runtime for file %v [h]: %v",f.Name(),time.Since(curFileStart).Hours()))
+		println(fmt.Sprintf("Total Runtime for file %v [h]: %v", f.Name(), time.Since(curFileStart).Hours()))
 		curOutFile.Close()
 		fileCount++
 	}
-	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v",time.Since(programStart).Hours()))
+	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v", time.Since(programStart).Hours()))
 }
 
 func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, outFile *os.File) {
 	var count = 0
-	var queryKeys, queryDomains = readDomains(fname,false)
+	var queryKeys, queryDomains = readDomains(fname, false)
 	for i := range queryDomains {
 		mh := lshensemble.NewMinhash(seed, numHash)
 		for v := range queryDomains[i] {
@@ -138,7 +123,7 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 			Size:      len(queryDomains[i]),
 			Signature: mh.Signature()}
 		count++
-		if (count%1000 == 0) {
+		if count%1000 == 0 {
 			batchTime := time.Since(curQueryingStart)
 			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFile.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
 			curQueryingStart = time.Now()
@@ -148,7 +133,10 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 		querySize := curRecord.Size
 		var queryKey = curRecord.Key
 		var queryKeyString = fmt.Sprintf("%v", queryKey)
-		var matchCounts [] int
+		var keyVals = strings.Split(queryKeyString, "||||")
+		var id = keyVals[0]
+		var version = keyVals[1]
+		var attrName = keyVals[2]
 		for i := range thresholds {
 			done := make(chan struct{})
 			defer close(done) // Important!!
@@ -157,23 +145,18 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 			// through a channel with option to cancel early.
 			results := index.Query(querySig, querySize, thresholds[i], done)
 			resCount := 0
-			for range results {
+			for j := range results {
+				var resultKeyString = fmt.Sprintf("%v", j)
+				var targetKeyVals = strings.Split(resultKeyString, "||||")
+				var targetID = targetKeyVals[0]
+				var targetVersion = targetKeyVals[1]
+				var targetAttrName = targetKeyVals[2]
+				println(resultKeyString)
+				//TODO: validate results
 				resCount++
-			}
-			matchCounts = append(matchCounts, resCount)
-		}
-		var keyVals = strings.Split(queryKeyString, "||||")
-		var pageID = keyVals[0]
-		var tableHID = keyVals[1]
-		var tableID = keyVals[2]
-		var column = keyVals[3]
-		//result writing new:
-		outFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,", pageID, tableHID, tableID, column))
-		for i := range thresholds {
-			if (i == len(thresholds)-1) {
-				outFile.WriteString(fmt.Sprintf("%v\n", matchCounts[i]))
-			} else {
-				outFile.WriteString(fmt.Sprintf("%v,", matchCounts[i]))
+				if targetID != id || version != targetVersion {
+					outFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v\n", id, version, attrName, targetID, targetVersion, targetAttrName))
+				}
 			}
 		}
 	}
@@ -181,9 +164,9 @@ func processQueryFile(fname string, inputFile os.FileInfo, seed int64, numHash i
 
 func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
 	filtered := make([]os.FileInfo, 0, len(infos))
-	for _, f := range infos{
-		if(strings.Contains(f.Name(),s)){
-			filtered = append(filtered,f)
+	for _, f := range infos {
+		if strings.Contains(f.Name(), s) {
+			filtered = append(filtered, f)
 		}
 	}
 	return filtered
@@ -192,7 +175,7 @@ func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
 func writeFileHeader(f *os.File, thresholds []float64) {
 	f.WriteString("pageID, tableHID, tableID, column,")
 	for i := range thresholds {
-		if (i == len(thresholds)-1) {
+		if i == len(thresholds)-1 {
 			f.WriteString(fmt.Sprintf("containmentAt_%v\n", thresholds[i]))
 		} else {
 			f.WriteString(fmt.Sprintf("containmentAt_%v,", thresholds[i]))
@@ -200,15 +183,17 @@ func writeFileHeader(f *os.File, thresholds []float64) {
 	}
 }
 
-func addMatchCounts(query []string, candidate []string,thresholds []float64,matchCounts []int) {
+func addMatchCounts(query []string, candidate []string, thresholds []float64, matchCounts []int) {
 	var queryMap = toMap(query)
 	var candidateMap = toMap(candidate)
 	var containmentCount = 0
 	for k := range queryMap {
-		if _, ok := candidateMap[k]; ok { containmentCount++}
+		if _, ok := candidateMap[k]; ok {
+			containmentCount++
+		}
 	}
 	for i := range thresholds {
-		if(float64(containmentCount) / float64(len(queryMap)) >= thresholds[i]){
+		if float64(containmentCount)/float64(len(queryMap)) >= thresholds[i] {
 			matchCounts[i]++
 		}
 	}
@@ -222,44 +207,33 @@ func toMap(elements []string) map[string]bool {
 	return elementMap
 }
 
-func readAllDomains(files []os.FileInfo,trainFiles []os.FileInfo) ([]map[string]bool, []string, map[string]bool) {
-	var domains [] map[string]bool
-	var keys [] string
+func readAllDomains(files []os.FileInfo) ([]map[string]bool, []string) {
+	var domains []map[string]bool
+	var keys []string
 	//files = files[1:10]
 	var count = 0
 	for _, f := range files {
-		if (count%10 == 0) {
+		if count%10 == 0 {
 			println(fmt.Sprintf("Read %v of %v files", count, len(files)))
 		}
-		var fname= os.Args[1] + "/" + f.Name()
-		var key, domain= readDomains(fname, false)
+		var fname = os.Args[1] + "/" + f.Name()
+		var key, domain = readDomains(fname, false)
 		keys = append(keys, key...)
 		domains = append(domains, domain...)
 		count++
 	}
-	var myTableKeys = make(map[string]bool)
-	for _, f := range trainFiles {
-		println(fmt.Sprintf("Reading %v", f))
-		var fname = os.Args[2] + "/" + f.Name()
-		var key,domain = readDomains(fname,true)
-		for i := range key{
-			myTableKeys[key[i]] = true
-		}
-		keys = append(keys, key...)
-		domains = append(domains, domain...)
-	}
-	return domains,keys, myTableKeys
+	return domains, keys
 }
 
-func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bool) {
+func readDomains(jsonFile string, keepSingleElem bool) ([]string, []map[string]bool) {
 	file, err := os.Open(jsonFile)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer file.Close()
 	reader := bufio.NewReader(file)
-	var keys [] string
-	var domains [] map[string]bool
+	var keys []string
+	var domains []map[string]bool
 
 	var line []byte
 	var errLR error
@@ -272,24 +246,25 @@ func readDomains(jsonFile string, keepSingleElem bool) ([]string,[]map[string]bo
 		}
 		errJson = json.Unmarshal(line, &domainJson)
 		var m = make(map[string]bool)
-		if(errJson!=nil){
+		if errJson != nil {
 			println("Error while parsing json")
+			println(errJson)
 			break
 		}
 		for j := 0; j < len(domainJson.Values); j++ {
 			m[domainJson.Values[j]] = true
 		}
-		if(keepSingleElem || len(m)>1) {
+		if keepSingleElem || len(m) > 1 {
 			var domainKey = getDomainKey(domainJson)
-			keys = append(keys,domainKey)
+			keys = append(keys, domainKey)
 			domains = append(domains, m)
 		}
 
 	}
-	return keys,domains
+	return keys, domains
 }
 
 func getDomainKey(domain Domain) string {
-	return fmt.Sprintf("%v||||%v||||%v||||%v", domain.PageID, domain.TableHID, domain.TID, domain.ColID)
+	key := fmt.Sprintf("%v||||%v||||%v||||%v", domain.Id, domain.version, domain.AttrName)
+	return key
 }
-
