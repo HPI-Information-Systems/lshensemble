@@ -14,9 +14,9 @@ import ( //"github.com/ekzhu/lshensemble"
 )
 
 type Domain struct {
-	Id       string //`json:"Id"''`
-	Version  string //`json:"Version"''` //TODO: fix this
-	AttrName string //`json:"AttrName"''`
+	Id       string   //`json:"Id"''`
+	Version  string   //`json:"Version"''` //TODO: fix this
+	AttrName string   //`json:"AttrName"''`
 	Values   []string `json:"values"''`
 }
 
@@ -25,7 +25,7 @@ func main() {
 	programStart := time.Now()
 	files, err := ioutil.ReadDir(os.Args[1])
 
-	queryFiles := filterByName(files, "query")
+	queryFiles := files
 	indexFiles := filterByName(files, "index")
 	queryEntireIndex := false
 	if len(queryFiles) == 0 {
@@ -93,14 +93,14 @@ func main() {
 	thresholds = append(thresholds, 0.8)
 	thresholds = append(thresholds, 0.9)
 	thresholds = append(thresholds, 1.0)
-	if(queryEntireIndex){
+	if queryEntireIndex {
 		var curFileStart = time.Now()
 		var curOutFile, _ = os.Create(os.Args[2] + "joinabilityGraph.csv")
 		writeFileHeader(curOutFile, thresholds)
-		processQueryDomains(indexDomains, seed, numHash,keys,0, curQueryingStart,"index", index, thresholds,keyToDomain,keyToDomain, curOutFile)
+		processQueryDomains(indexDomains, seed, numHash, keys, 0, curQueryingStart, "index", index, thresholds, keyToDomain, keyToDomain, curOutFile)
 		println(fmt.Sprintf("Total Runtime for querying entire index [h]: %v", time.Since(curFileStart).Hours()))
 		curOutFile.Close()
-	} else{
+	} else {
 		var fileCount = 0
 		for _, f := range queryFiles {
 			if fileCount%10 == 0 {
