@@ -14,9 +14,9 @@ import ( //"github.com/ekzhu/lshensemble"
 )
 
 type Domain struct {
-	Id       string   //`json:"Id"''`
-	version  string   //`json:"version"''` //TODO: fix this
-	AttrName string   //`json:"AttrName"''`
+	Id       string //`json:"Id"''`
+	Version  string //`json:"Version"''` //TODO: fix this
+	AttrName string //`json:"AttrName"''`
 	Values   []string `json:"values"''`
 }
 
@@ -27,14 +27,15 @@ func main() {
 
 	queryFiles := filterByName(files, "query")
 	indexFiles := filterByName(files, "index")
+	queryEntireIndex := false
 	if len(queryFiles) == 0 {
-		queryFiles = indexFiles
+		queryEntireIndex = true
 	}
 	//
-	domainsToIndex, keys, keyToDomain := readAllDomains(indexFiles) //TODO: make this return a map from key to domainsToIndex
+	indexDomains, keys, keyToDomain := readAllDomains(indexFiles)
 
 	// initializing the domain records to hold the MinHash signatures
-	domainRecords := make([]*lshensemble.DomainRecord, len(domainsToIndex))
+	domainRecords := make([]*lshensemble.DomainRecord, len(indexDomains))
 
 	// set the minhash seed
 	var seed int64 = 42
@@ -42,16 +43,16 @@ func main() {
 	// set the number of hash functions
 	numHash := 256
 
-	println("Done Reading files, beginning to processing domainsToIndex")
+	println("Done Reading files, beginning to processing indexDomains")
 	// create the domain records with the signatures
-	for i := range domainsToIndex {
+	for i := range indexDomains {
 		mh := lshensemble.NewMinhash(seed, numHash)
-		for v := range domainsToIndex[i] {
+		for v := range indexDomains[i] {
 			mh.Push([]byte(v))
 		}
 		domainRecords[i] = &lshensemble.DomainRecord{
 			Key:       keys[i],
-			Size:      len(domainsToIndex[i]),
+			Size:      len(indexDomains[i]),
 			Signature: mh.Signature()}
 	}
 	println("Done processing files")
@@ -92,20 +93,29 @@ func main() {
 	thresholds = append(thresholds, 0.8)
 	thresholds = append(thresholds, 0.9)
 	thresholds = append(thresholds, 1.0)
-	var fileCount = 0
-	for _, f := range queryFiles {
-		if fileCount%10 == 0 {
-			println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
-		}
-		var fname = os.Args[1] + "/" + f.Name()
-		println("processing file " + f.Name())
+	if(queryEntireIndex){
 		var curFileStart = time.Now()
-		var curOutFile, _ = os.Create(os.Args[2] + f.Name() + "_joinabilityGraph.csv")
+		var curOutFile, _ = os.Create(os.Args[2] + "joinabilityGraph.csv")
 		writeFileHeader(curOutFile, thresholds)
-		processQueryFile(keyToDomain, fname, f, seed, numHash, curQueryingStart, index, thresholds, curOutFile)
-		println(fmt.Sprintf("Total Runtime for file %v [h]: %v", f.Name(), time.Since(curFileStart).Hours()))
+		processQueryDomains(indexDomains, seed, numHash,keys,0, curQueryingStart,"index", index, thresholds,keyToDomain,keyToDomain, curOutFile)
+		println(fmt.Sprintf("Total Runtime for querying entire index [h]: %v", time.Since(curFileStart).Hours()))
 		curOutFile.Close()
-		fileCount++
+	} else{
+		var fileCount = 0
+		for _, f := range queryFiles {
+			if fileCount%10 == 0 {
+				println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
+			}
+			var fname = os.Args[1] + "/" + f.Name()
+			println("processing file " + f.Name())
+			var curFileStart = time.Now()
+			var curOutFile, _ = os.Create(os.Args[2] + f.Name() + "_joinabilityGraph.csv")
+			writeFileHeader(curOutFile, thresholds)
+			processQueryFile(keyToDomain, fname, f, seed, numHash, curQueryingStart, index, thresholds, curOutFile)
+			println(fmt.Sprintf("Total Runtime for file %v [h]: %v", f.Name(), time.Since(curFileStart).Hours()))
+			curOutFile.Close()
+			fileCount++
+		}
 	}
 	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v", time.Since(programStart).Hours()))
 }
@@ -114,6 +124,10 @@ func processQueryFile(indexKeyToDomain map[string]map[string]bool, fname string,
 	var count = 0
 	var queryKeyToDomain = make(map[string]map[string]bool)
 	var queryKeys, queryDomains = readDomains(fname, queryKeyToDomain, false)
+	processQueryDomains(queryDomains, seed, numHash, queryKeys, count, curQueryingStart, inputFile.Name(), index, thresholds, queryKeyToDomain, indexKeyToDomain, outFile)
+}
+
+func processQueryDomains(queryDomains []map[string]bool, seed int64, numHash int, queryKeys []string, count int, curQueryingStart time.Time, inputFileName string, index *lshensemble.LshEnsemble, thresholds []float64, queryKeyToDomain map[string]map[string]bool, indexKeyToDomain map[string]map[string]bool, outFile *os.File) {
 	for i := range queryDomains {
 		mh := lshensemble.NewMinhash(seed, numHash)
 		for v := range queryDomains[i] {
@@ -126,7 +140,7 @@ func processQueryFile(indexKeyToDomain map[string]map[string]bool, fname string,
 		count++
 		if count%1000 == 0 {
 			batchTime := time.Since(curQueryingStart)
-			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFile.Name(), batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
+			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFileName, batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
 			curQueryingStart = time.Now()
 		}
 		// query in the domain records:
@@ -167,7 +181,6 @@ func processQueryFile(indexKeyToDomain map[string]map[string]bool, fname string,
 				}
 			}
 		}
-
 	}
 }
 
@@ -182,7 +195,7 @@ func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
 }
 
 func writeFileHeader(f *os.File, thresholds []float64) {
-	f.WriteString("id, version, attrName, id_fk,version_fk,attrName_fk,")
+	f.WriteString("id, Version, attrName, id_fk,version_fk,attrName_fk,")
 	for i := range thresholds {
 		if i == len(thresholds)-1 {
 			f.WriteString(fmt.Sprintf("FK_at_%v\n", thresholds[i]))
@@ -277,6 +290,6 @@ func readDomains(jsonFile string, keyToDomain map[string]map[string]bool, keepSi
 }
 
 func getDomainKey(domain Domain) string {
-	key := fmt.Sprintf("%v||||%v||||%v||||%v", domain.Id, domain.version, domain.AttrName)
+	key := fmt.Sprintf("%v||||%v||||%v||||%v", domain.Id, domain.Version, domain.AttrName)
 	return key
 }
