@@ -9,6 +9,7 @@ import ( //"github.com/ekzhu/lshensemble"
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,9 +25,13 @@ func main() {
 
 	programStart := time.Now()
 	files, err := ioutil.ReadDir(os.Args[1])
-
-	queryFiles := files
-	indexFiles := filterByName(files, "index")
+	startDateIndex := toDate(os.Args[3])
+	endDateIndex := toDate(os.Args[4])
+	files = filterByDateRange(files, startDateIndex, endDateIndex)
+	indexFiles := files
+	//load query table:
+	joinCandidatestoQuery := loadQueryTable(os.Args[5])
+	queryFiles := filterByName(files, "index")
 	queryEntireIndex := false
 	if len(queryFiles) == 0 {
 		queryEntireIndex = true
@@ -97,11 +102,12 @@ func main() {
 		var curFileStart = time.Now()
 		var curOutFile, _ = os.Create(os.Args[2] + "joinabilityGraph.csv")
 		writeFileHeader(curOutFile, thresholds)
-		processQueryDomains(indexDomains, seed, numHash, keys, 0, curQueryingStart, "index", index, thresholds, keyToDomain, keyToDomain, curOutFile)
+		newJoinCandidatesToQuery := processQueryDomains(indexDomains, joinCandidatestoQuery, seed, numHash, keys, 0, curQueryingStart, "index", index, thresholds, keyToDomain, keyToDomain, curOutFile)
+		processQueryDomains(indexDomains, newJoinCandidatesToQuery, seed, numHash, keys, 0, curQueryingStart, "index", index, thresholds, keyToDomain, keyToDomain, curOutFile)
 		println(fmt.Sprintf("Total Runtime for querying entire index [h]: %v", time.Since(curFileStart).Hours()))
 		curOutFile.Close()
 	} else {
-		var fileCount = 0
+		/*var fileCount = 0
 		for _, f := range queryFiles {
 			if fileCount%10 == 0 {
 				println(fmt.Sprintf("Read %v of %v files", fileCount, len(queryFiles)))
@@ -115,73 +121,142 @@ func main() {
 			println(fmt.Sprintf("Total Runtime for file %v [h]: %v", f.Name(), time.Since(curFileStart).Hours()))
 			curOutFile.Close()
 			fileCount++
-		}
+		}*/
 	}
 	println(fmt.Sprintf("Total Runtime for entire Feature Extraction [h]: %v", time.Since(programStart).Hours()))
 }
 
-func processQueryFile(indexKeyToDomain map[string]map[string]bool, fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, outFile *os.File) {
+type QueryDSInfo struct {
+	strID   string
+	version time.Time
+}
+
+func newQueryDSInfo(strID string, version time.Time) *QueryDSInfo {
+	e := new(QueryDSInfo)
+	e.version = version
+	e.strID = strID
+	return e
+}
+
+func loadQueryTable(s string) map[QueryDSInfo]bool {
+	var m = make(map[QueryDSInfo]bool)
+	file, err := os.Open(s)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Split(line, ",")
+		queryDSInfo := *newQueryDSInfo(parts[1], toDate(parts[2]))
+		m[queryDSInfo] = true
+	}
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+	return m
+}
+
+func filterByDateRange(infos []os.FileInfo, startDateIndex time.Time, endDateIndex time.Time) []os.FileInfo {
+	filtered := make([]os.FileInfo, 0, len(infos))
+	for _, f := range infos {
+		nameAsDate := toDate(f.Name())
+		if (nameAsDate.Equal(startDateIndex) || nameAsDate.After(startDateIndex)) && (nameAsDate.Equal(endDateIndex) || nameAsDate.Before(endDateIndex)) {
+			filtered = append(filtered, f)
+		}
+	}
+	return filtered
+}
+
+func toDate(s string) time.Time {
+	a := strings.Split(s, "-")
+	year, _ := strconv.Atoi(a[0])
+	month, _ := strconv.Atoi(a[1])
+	day, _ := strconv.Atoi(a[2])
+	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+}
+
+/*func processQueryFile(indexKeyToDomain map[string]map[string]bool, fname string, inputFile os.FileInfo, seed int64, numHash int, curQueryingStart time.Time, index *lshensemble.LshEnsemble, thresholds []float64, outFile *os.File) {
 	var count = 0
 	var queryKeyToDomain = make(map[string]map[string]bool)
 	var queryKeys, queryDomains = readDomains(fname, queryKeyToDomain, false)
 	processQueryDomains(queryDomains, seed, numHash, queryKeys, count, curQueryingStart, inputFile.Name(), index, thresholds, queryKeyToDomain, indexKeyToDomain, outFile)
-}
+}*/
 
-func processQueryDomains(queryDomains []map[string]bool, seed int64, numHash int, queryKeys []string, count int, curQueryingStart time.Time, inputFileName string, index *lshensemble.LshEnsemble, thresholds []float64, queryKeyToDomain map[string]map[string]bool, indexKeyToDomain map[string]map[string]bool, outFile *os.File) {
+func processQueryDomains(queryDomains []map[string]bool, toQuery map[QueryDSInfo]bool, seed int64, numHash int, queryKeys []string, count int, curQueryingStart time.Time, inputFileName string, index *lshensemble.LshEnsemble, thresholds []float64, queryKeyToDomain map[string]map[string]bool, indexKeyToDomain map[string]map[string]bool, outFile *os.File) map[QueryDSInfo]bool {
+	//track all vertices that we mapped to
+	var connectedDatasets = make(map[QueryDSInfo]bool)
 	for i := range queryDomains {
-		mh := lshensemble.NewMinhash(seed, numHash)
-		for v := range queryDomains[i] {
-			mh.Push([]byte(v))
-		}
-		curRecord := &lshensemble.DomainRecord{
-			Key:       queryKeys[i],
-			Size:      len(queryDomains[i]),
-			Signature: mh.Signature()}
-		count++
-		if count%1000 == 0 {
-			batchTime := time.Since(curQueryingStart)
-			println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFileName, batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
-			curQueryingStart = time.Now()
-		}
-		// query in the domain records:
-		querySig := curRecord.Signature
-		querySize := curRecord.Size
-		var queryKey = curRecord.Key
-		var queryKeyString = fmt.Sprintf("%v", queryKey)
+		var queryKeyString = fmt.Sprintf("%v", queryKeys[i])
 		var keyVals = strings.Split(queryKeyString, "||||")
 		var id = keyVals[0]
-		var version = keyVals[1]
+		var versionStr = keyVals[1]
+		version := toDate(versionStr)
 		var attrName = keyVals[2]
-		done := make(chan struct{})
-		defer close(done) // Important!!
-		// set the containment startingThreshold
-		// get the keys of the candidate domainsToIndex (may contain false positives)
-		// through a channel with option to cancel early.
-		results := index.Query(querySig, querySize, thresholds[0], done)
-		resCount := 0
-		for j := range results {
-			var resultKeyString = fmt.Sprintf("%v", j)
-			var targetKeyVals = strings.Split(resultKeyString, "||||")
-			var targetID = targetKeyVals[0]
-			var targetVersion = targetKeyVals[1]
-			var targetAttrName = targetKeyVals[2]
-			//TODO: validate results
-			resCount++
-			if targetID != id || version != targetVersion {
-				queryValues := queryKeyToDomain[queryKeyString]
-				resultValues := indexKeyToDomain[resultKeyString]
-				results := getTrueResults(queryValues, resultValues, thresholds)
-				outFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,", id, version, attrName, targetID, targetVersion, targetAttrName))
-				for i := range thresholds {
-					if i == len(thresholds)-1 {
-						outFile.WriteString(fmt.Sprintf("%v\n", results[i]))
-					} else {
-						outFile.WriteString(fmt.Sprintf("%v,", results[i]))
+		if _, ok := toQuery[*newQueryDSInfo(id, version)]; ok {
+			mh := lshensemble.NewMinhash(seed, numHash)
+			for v := range queryDomains[i] {
+				mh.Push([]byte(v))
+			}
+			curRecord := &lshensemble.DomainRecord{
+				Key:       queryKeys[i],
+				Size:      len(queryDomains[i]),
+				Signature: mh.Signature()}
+			count++
+			if count%1000 == 0 {
+				batchTime := time.Since(curQueryingStart)
+				println(fmt.Sprintf("In file %v it took %v minutes to query %v domains out of %v (%v%%)", inputFileName, batchTime.Minutes(), count, len(queryKeys), 100.0*float64(count)/float64(len(queryKeys))))
+				curQueryingStart = time.Now()
+			}
+			// query in the domain records:
+			querySig := curRecord.Signature
+			querySize := curRecord.Size
+			done := make(chan struct{})
+			defer close(done) // Important!!
+			// set the containment startingThreshold
+			// get the keys of the candidate domainsToIndex (may contain false positives)
+			// through a channel with option to cancel early.
+			results := index.Query(querySig, querySize, thresholds[0], done)
+			resCount := 0
+			for j := range results {
+				var resultKeyString = fmt.Sprintf("%v", j)
+				var targetKeyVals = strings.Split(resultKeyString, "||||")
+				var targetID = targetKeyVals[0]
+				var targetVersion = targetKeyVals[1]
+				var targetAttrName = targetKeyVals[2]
+				var targetVersionDate = toDate(targetVersion)
+				resCount++
+				if (targetID != id || versionStr != targetVersion) && !targetVersionDate.After(toDate(versionStr)) {
+					queryValues := queryKeyToDomain[queryKeyString]
+					resultValues := indexKeyToDomain[resultKeyString]
+					results := getTrueResults(queryValues, resultValues, thresholds)
+					if _, found := Find(results, true); found {
+						connectedDatasets[*newQueryDSInfo(targetID, toDate(targetVersion))] = true
+						outFile.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,", id, versionStr, attrName, targetID, targetVersion, targetAttrName))
+						for i := range thresholds {
+							if i == len(thresholds)-1 {
+								outFile.WriteString(fmt.Sprintf("%v\n", results[i]))
+							} else {
+								outFile.WriteString(fmt.Sprintf("%v,", results[i]))
+							}
+						}
 					}
 				}
 			}
 		}
 	}
+	return connectedDatasets
+}
+
+func Find(slice []bool, val bool) (int, bool) {
+	for i, item := range slice {
+		if item == val {
+			return i, true
+		}
+	}
+	return -1, false
 }
 
 func filterByName(infos []os.FileInfo, s string) []os.FileInfo {
@@ -278,6 +353,7 @@ func readDomains(jsonFile string, keyToDomain map[string]map[string]bool, keepSi
 		for j := 0; j < len(domainJson.Values); j++ {
 			m[domainJson.Values[j]] = true
 		}
+		//TODO: add filter possibility here according to query table!
 		if keepSingleElem || len(m) > 1 {
 			var domainKey = getDomainKey(domainJson)
 			keys = append(keys, domainKey)
@@ -290,6 +366,6 @@ func readDomains(jsonFile string, keyToDomain map[string]map[string]bool, keepSi
 }
 
 func getDomainKey(domain Domain) string {
-	key := fmt.Sprintf("%v||||%v||||%v||||%v", domain.Id, domain.Version, domain.AttrName)
+	key := fmt.Sprintf("%v||||%v||||%v", domain.Id, domain.Version, domain.AttrName)
 	return key
 }
